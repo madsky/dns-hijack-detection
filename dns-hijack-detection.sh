@@ -1,45 +1,164 @@
 #!/bin/bash
 
-#@leighhall 2014-12-22
+#@leighhall
+#10th Feb 2015
 
 cd "$(dirname $0)"
 
+rm index*
+rm newurls.txt
+
+#1 - pull down the in-scope URLs
+
+wget -i urls.txt
+
+#2 - extract all URLs
+
+#from Al H
+cat index* | tr "[\"' ] " '\n' | tr '[A-Z]' '[a-z]' | egrep "https?://[a-z0-9\-]{1,}[.][a-z0-9\-]" | sed -r 's .*https?://  g;s /.*  g' | sort -u >indexoflinks.txt
+
+#3 - check if we've seen the URLs before - if not, add them to the nomatch.txt file
+
 touch nomatch.txt
+
+while read line; do
+        sMatch=0
+        while read mast; do
+                sComp=`echo $mast | awk '{print $1}'`
+                if [ $line = $sComp ]; then
+                        sMatch=1
+                        break
+                fi
+        done<masterlist.txt
+        if [ $sMatch = 0 ]; then
+                #echo `date` "New URL found: " $line >> nomatch.txt
+                echo $line `host $line | awk '{print $4}' | egrep ^[0-9] -m 1` >> masterlist.txt
+                echo `date` "New URL found: " $line `host $line | awk '{print $4}' | egrep ^[0-9] -m 1` >> nomatch.txt
+        fi
+done<indexoflinks.txt
+
+#4 - check the IP address matches the previous recorded address.  If it doesn't, write it to nomatch.txt
+#5 - check the whois info for the IP address and see if we can rule out some CDN-type mismatches through netname registrant (NOT 100% effective)
+
 touch debug.txt
 
 while read line; do
-	sMatch=0
-	surl=`echo $line | awk '{print $1}'`
-	sip=`echo $line | awk '{print $2}'`
-		
-	echo Checking $surl 
+        sMatch=0
+        surl=`echo $line | awk '{print $1}'`
+        sip=`echo $line | awk '{print $2}'`
 
-	shost=`host $surl | awk '{print $4}' | egrep ^[0-9] -m 1`
+        echo Checking $surl
 
-	for i in $line #this loop caters for multiple IPs on one line
-		do
-		echo "Line:" $line "HOST:" $shost "(VALUE:"$i")" >> debug.txt
-		if [ $shost = $i ]; then
-			echo "Matched" >> debug.txt
-			sMatch=1
-			break
-		fi
-		done
+        shost=`host $surl | awk '{print $4}' | egrep ^[0-9] -m 1`
 
-	if [ $sMatch = 0 ]; then
-		echo "No Match" >> debug.txt
-		echo `date` "Possible DNS problem for this record. Expected: " $line " Got: ($shost)" >> nomatch.txt
-		echo "                                   **NOMATCH**"
-	fi
-done <withIPs.txt
+        for i in $line #this loop caters for multiple IPs on one line
+                do
+                echo "Line:" $line "HOST:" $shost "(VALUE:"$i")" >> debug.txt
+
+                #build an exception for CDN networks which keep changing IP address...
+                if [ $i = "CDN" ]; then
+                        echo "CDN" >> debug.txt
+                        sMatch=1
+                        break
+                fi
+
+                if [ $shost = $i ]; then
+                        echo "Matched" >> debug.txt
+                        sMatch=1
+                        break
+                fi
+                done
+
+        if [ $sMatch = 0 ]; then
+                #the IP address on record doesn't match, so check the whois details
+                #if whois($sip ) == whois($shost) then we're ok, else panic
+                sOld=`whois $sip | egrep -m 1 -i netname | awk '{print $2}'`
+                sNew=`whois $shost | egrep -m 1 -i netname | awk '{print $2}'`
+
+                echo "No Match on IP" >> debug.txt
+
+                
+
+                if [ $sOld = $sNew ]; then
+                        
+                        #it's ok
+                        echo "whois netname matches: LOW risk of hijack" >> debug.txt
+                else
+                        
+                        #it's not ok
+                        echo "whois netname does not match: some risk of hijack" >> debug.txt
+                        echo `date` "Possible DNS problem for this record. Expected: $line Got: ($shost) Whois netname (expected): $sOld Whois netname (actual): ($sNew)" >> nomatch.txt
+                fi
+
+        fi
+done <masterlist.txt
+
+#6 - append the results to the masteroutputlist.txt file if we have any
 
 if [ -s nomatch.txt ]; then
-	#file is NOT ZERO sized, therefore there might be problems
-	echo Problems found
+        #file is NOT ZERO sized, therefore there might be problems
+        cat nomatch.txt >> masteroutputlist.txt
+        echo Problems found
 else
-	echo No problems found
+        echo No problems found
 fi
 
-DATE=$(date +"%Y%m%d%H%M")
-mv debug.txt logs/$DATE.debug.log
-mv nomatch.txt logs/$DATE.nomatch.log
+#7 - output the massteroutputlist.txt to xml/rss format
+
+cnt=0
+sDate=$(date +"%a, %d %b %Y %T %Z")
+
+#xml header
+echo '<?xml version="1.0" encoding="utf-8"?>' >>rss.feed
+echo '<rss version="2.0">' >>rss.feed
+        echo '<channel>' >>rss.feed
+                echo '<title>DNS Hijack Detection</title>'  >>rss.feed
+                echo '<link>http://madsky.co.uk</link>'  >>rss.feed
+                echo '<description>DNS Hijack Detection</description>'  >>rss.feed
+                echo '<language>en-gb</language>'  >>rss.feed
+                echo '<pubDate>'$sDate' </pubDate>'  >>rss.feed
+                echo '<generator>Manually generated by script</generator>'  >>rss.feed
+
+#xml body
+while read line; do
+
+$((cnt=cnt+1))
+sDate=`echo $line | awk '{print $1" " $2" " $3" " $6" " $4" " $5}'`
+sType=`echo $line | awk '{print $7}'`
+sTitle=`echo $line | awk '{print $14}'`
+sURLNew=`echo $line | awk '{print $10}'`
+
+if [ $sType = "New" ]; then
+        echo '<item>' >>rss.feed
+                echo '<title> New URL Detected </title>' >>rss.feed
+                echo '<link>http://'$sURLNew'</link>' >>rss.feed
+                echo '<description>'$line'</description>' >>rss.feed
+                echo '<pubDate>'$sDate' </pubDate>' >>rss.feed
+                echo '<guid>'$sDate $cnt '</guid>' >>rss.feed
+        echo '</item>' >>rss.feed
+else
+        echo '<item>' >>rss.feed
+                echo '<title>'$sTitle'</title>' >>rss.feed
+                echo '<link>http://'$sTitle'</link>' >>rss.feed
+                echo '<description>'$line'</description>' >>rss.feed
+                echo '<pubDate>'$sDate' </pubDate>' >>rss.feed
+                echo '<guid>'$sDate $cnt' </guid>' >>rss.feed
+        echo '</item>' >>rss.feed
+fi
+
+done<masteroutputlist.txt
+
+#xml footer
+        echo '</channel>' >>rss.feed
+echo '</rss>' >>rss.feed
+
+#8 - upload to s3
+
+sDate=$(date +"%Y%m%d%H%M")
+s3cmd -P --mime-type=application/rss+xml put rss.feed s3:<s3-location>
+
+#9 - clean up the log files
+
+mv rss.feed logs/$sDate.v2.rss
+mv debug.txt logs/$sDate.debug.v2.log
+mv nomatch.txt logs/$sDate.nomatch.v2.log
